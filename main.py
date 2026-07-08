@@ -34,11 +34,7 @@ available_dishes = random.sample(ALL_DISHES, 5)
 
 
 def _generate_user_input() -> str:
-    input_client = OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY")
-    )
-
-    response = input_client.responses.create(
+    generate_user_input_response = client.responses.create(
         model="gpt-4o-mini",
         instructions=(
             "You generate a single, realistic meal request as if written by "
@@ -49,7 +45,7 @@ def _generate_user_input() -> str:
         input="Generate one random meal request.",
     )
 
-    return response.output_text.strip()
+    return generate_user_input_response.output_text.strip()
 
 
 langfuse = get_client()
