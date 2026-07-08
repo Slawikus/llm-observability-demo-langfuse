@@ -1,7 +1,10 @@
 # llm-observability-demo-langfuse
 
-A small demo that uses the OpenAI API to generate a meal plan from a randomly
-rotating menu.
+A small demo that mocks a system which recommends users a dish for a dinner.
+It uses the OpenAI API to generate a meal plan from a randomly rotating menu,
+tailored to the user's request.
+
+![System preview](docs/system-preview.png)
 
 ## Setup
 
