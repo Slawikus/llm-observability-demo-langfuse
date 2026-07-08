@@ -50,7 +50,8 @@ def _generate_user_input() -> str:
     return response.output_text.strip()
 
 
-user_input = _generate_user_input()
+# user_input = _generate_user_input()
+user_input = "I want a big bowl of creamy mac and cheese with a crispy topping"
 
 response = client.responses.create(
     model="gpt-4o-mini",
