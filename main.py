@@ -55,8 +55,9 @@ def _generate_user_input() -> str:
 langfuse = get_client()
 
 # Attach a session id so multiple runs (each its own trace) are grouped
-# into one replayable session thread in Langfuse.
-with propagate_attributes(session_id=str(uuid.uuid4())):
+# into one replayable session thread in Langfuse. A constant user_id is
+# added so traces can be attributed to (and filtered by) a specific user.
+with propagate_attributes(session_id=str(uuid.uuid4()), user_id="demo-user"):
     # Group both OpenAI calls under a single parent trace so the whole
     # request cycle is observable as one unit in Langfuse.
     with langfuse.start_as_current_observation(name="meal-planning"):
