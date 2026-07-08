@@ -1,7 +1,7 @@
 import os
 import random
 from dotenv import load_dotenv
-from openai import OpenAI
+from langfuse.openai import OpenAI
 from output import nicer_print
 
 # Load variables from .env file
