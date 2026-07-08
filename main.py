@@ -1,7 +1,8 @@
 import os
 import random
+import uuid
 from dotenv import load_dotenv
-from langfuse import get_client
+from langfuse import get_client, propagate_attributes
 from langfuse.openai import OpenAI
 from output import nicer_print
 
@@ -53,24 +54,27 @@ def _generate_user_input() -> str:
 
 langfuse = get_client()
 
-# Group both OpenAI calls under a single parent trace so the whole
-# request cycle is observable as one unit in Langfuse.
-with langfuse.start_as_current_observation(name="meal-planning"):
-    user_input = _generate_user_input()
-    # user_input = "I want a big bowl of creamy mac and cheese with a crispy topping"
+# Attach a session id so multiple runs (each its own trace) are grouped
+# into one replayable session thread in Langfuse.
+with propagate_attributes(session_id=str(uuid.uuid4())):
+    # Group both OpenAI calls under a single parent trace so the whole
+    # request cycle is observable as one unit in Langfuse.
+    with langfuse.start_as_current_observation(name="meal-planning"):
+        user_input = _generate_user_input()
+        # user_input = "I want a big bowl of creamy mac and cheese with a crispy topping"
 
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        instructions=(
-            "You are a helpful meal planning assistant. "
-            "Create a meal plan of exactly 2 dishes chosen ONLY from the "
-            "following available dishes:\n"
-            f"{', '.join(available_dishes)}\n"
-            "Tailor the choices to the user's request. "
-            "Do not invent dishes that are not in the list. "
-            "For each dish, add a short one-line reason why it fits."
-        ),
-        input=user_input,
-    )
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            instructions=(
+                "You are a helpful meal planning assistant. "
+                "Create a meal plan of exactly 2 dishes chosen ONLY from the "
+                "following available dishes:\n"
+                f"{', '.join(available_dishes)}\n"
+                "Tailor the choices to the user's request. "
+                "Do not invent dishes that are not in the list. "
+                "For each dish, add a short one-line reason why it fits."
+            ),
+            input=user_input,
+        )
 
 nicer_print(user_input, available_dishes, response.output_text)
