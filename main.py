@@ -64,18 +64,17 @@ with propagate_attributes(session_id=str(uuid.uuid4()), user_id="demo-user"):
         user_input = _generate_user_input()
         # user_input = "I want a big bowl of creamy mac and cheese with a crispy topping"
 
-        response = client.responses.create(
+        # Fetch the managed prompt from Langfuse and fill its {{dishes}}
+        # placeholder with this run's available dishes.
+        meal_prompt = langfuse.get_prompt("meal-prep-prompt")
+        instructions = meal_prompt.compile(dishes=", ".join(available_dishes))
+
+        response = client.responses.create(  # type: ignore[call-overload]
             model="gpt-4o-mini",
-            instructions=(
-                "You are a helpful meal planning assistant. "
-                "Create a meal plan of exactly 2 dishes chosen ONLY from the "
-                "following available dishes:\n"
-                f"{', '.join(available_dishes)}\n"
-                "Tailor the choices to the user's request. "
-                "Do not invent dishes that are not in the list. "
-                "For each dish, add a short one-line reason why it fits."
-            ),
+            instructions=instructions,
             input=user_input,
+            # Link the generation to the prompt version for per-prompt metrics.
+            langfuse_prompt=meal_prompt,
         )
 
 nicer_print(user_input, available_dishes, response.output_text)
