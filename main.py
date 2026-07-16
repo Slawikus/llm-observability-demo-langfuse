@@ -38,6 +38,7 @@ model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 langfuse = get_client()
 
+@observe(name="step-greeting")
 def greet_and_collect_name() -> str:
     response = client.chat.completions.create(
         model=model,
@@ -55,6 +56,7 @@ def greet_and_collect_name() -> str:
     return response.choices[0].message.content
 
 
+@observe(name="step-auth")
 def verify_tenant(name: str, address: str) -> AuthResult:
     response = client.beta.chat.completions.parse(
         model=model,
@@ -75,6 +77,7 @@ def verify_tenant(name: str, address: str) -> AuthResult:
     return response.choices[0].message.parsed
 
 
+@observe(name="step-routing")
 def route_to_department(transcript: str) -> RoutingDecision:
     dept_list = "\n".join(f"- {k}: {v}" for k, v in DEPARTMENTS.items())
 
