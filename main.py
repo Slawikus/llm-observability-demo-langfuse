@@ -1,8 +1,9 @@
 import os
+import uuid
 from dotenv import load_dotenv
 from langfuse.openai import OpenAI
 from pydantic import BaseModel
-from output import nicer_print
+from langfuse import get_client, observe, propagate_attributes
 
 # Load variables from .env file
 load_dotenv()
@@ -35,6 +36,7 @@ class RoutingDecision(BaseModel):
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
+langfuse = get_client()
 
 def greet_and_collect_name() -> str:
     response = client.chat.completions.create(
@@ -95,39 +97,45 @@ def route_to_department(transcript: str) -> RoutingDecision:
     return response.choices[0].message.parsed
 
 
+@observe(name="tenant-routing-call")
 def handle_call():
-    print("\n🏠 Stadtquartier Wohnservice — Tenant Support")
-    print("-" * 45)
+    session_id = uuid.uuid4().hex[:8]
+    with propagate_attributes(session_id=session_id):
+        print("\n🏠 Stadtquartier Wohnservice — Tenant Support")
+        print(f"Session: {session_id}")
+        print("-" * 45)
 
-    greeting = greet_and_collect_name()
-    print(f"Agent: {greeting}")
+        greeting = greet_and_collect_name()
+        print(f"Agent: {greeting}")
 
-    name = input("\nTenant (name): ").strip()
-    address = input("Tenant (address): ").strip()
+        name = input("\nTenant (name): ").strip()
+        address = input("Tenant (address): ").strip()
 
-    auth = verify_tenant(name, address)
-    if not auth.verified:
-        print(f"Agent: I'm sorry, I couldn't verify your details. Please call us directly.")
-        return
+        auth = verify_tenant(name, address)
+        if not auth.verified:
+            print(f"Agent: I'm sorry, I couldn't verify your details. Please call us directly.")
+            with propagate_attributes(tags=["auth-failed"]):
+                return
 
-    print(f"Agent: Thank you {auth.customer_name}. How can I help you today?")
-    issue = input("Issue: ").strip()
+        print(f"Agent: Thank you {auth.customer_name}. How can I help you today?")
+        issue = input("Issue: ").strip()
 
-    transcript = (
-        f"Tenant name: {name}\n"
-        f"Address: {address}\n"
-        f"Issue: {issue}\n"
-    )
+        transcript = (
+            f"Tenant name: {name}\n"
+            f"Address: {address}\n"
+            f"Issue: {issue}\n"
+        )
 
-    print(transcript)
+        print(transcript)
 
-    routing = route_to_department(transcript)
-    print(f"\n✅ Routing to: {DEPARTMENTS[routing.department]}")
-    print(f"   Reason: {routing.routing_reason}")
-    print(f"   Confidence: {routing.confidence}")
-    print(f"   Issue summary: {routing.issue_summary}")
+        routing = route_to_department(transcript)
+        print(f"\n✅ Routing to: {DEPARTMENTS[routing.department]}")
+        print(f"   Reason: {routing.routing_reason}")
+        print(f"   Confidence: {routing.confidence}")
+        print(f"   Issue summary: {routing.issue_summary}")
 
 if __name__ == "__main__":
     handle_call()
+    langfuse.flush()
 
 # nicer_print(user_input, available_dishes, response.output_text)
