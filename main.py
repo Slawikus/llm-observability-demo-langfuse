@@ -36,7 +36,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 
-def greet_and_collect_name(customer_message: str) -> str:
+def greet_and_collect_name() -> str:
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -48,7 +48,6 @@ def greet_and_collect_name(customer_message: str) -> str:
                     "If they haven't given their name, ask for it."
                 )
             },
-            {"role": "user", "content": customer_message}
         ]
     )
     return response.choices[0].message.content
@@ -100,8 +99,7 @@ def handle_call():
     print("\n🏠 Stadtquartier Wohnservice — Tenant Support")
     print("-" * 45)
 
-    opening = input("Tenant: ").strip()
-    greeting = greet_and_collect_name(opening)
+    greeting = greet_and_collect_name()
     print(f"Agent: {greeting}")
 
     name = input("\nTenant (name): ").strip()
@@ -116,7 +114,6 @@ def handle_call():
     issue = input("Issue: ").strip()
 
     transcript = (
-        f"Opening message: {opening}\n"
         f"Tenant name: {name}\n"
         f"Address: {address}\n"
         f"Issue: {issue}\n"
