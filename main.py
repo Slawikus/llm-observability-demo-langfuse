@@ -58,6 +58,11 @@ def greet_and_collect_name() -> str:
 
 @observe(name="step-auth")
 def verify_tenant(name: str, address: str) -> AuthResult:
+    # Manual sub-span inside the @observe function
+    with langfuse.start_as_current_observation(name="address-format-check") as span:
+        is_plausible = len(address.split()) >= 2
+        span.update(metadata={"raw_address": address, "passed_format": is_plausible})
+
     response = client.beta.chat.completions.parse(
         model=model,
         messages=[
@@ -132,6 +137,18 @@ def handle_call():
         print(transcript)
 
         routing = route_to_department(transcript)
+
+        # Attach routing result to the parent trace for dashboard filtering
+        propagate_attributes(
+            tags=[routing.department, f"confidence-{routing.confidence}"],
+            metadata={
+                "routing_department": routing.department,
+                "routing_reason": routing.routing_reason,
+                "confidence": routing.confidence,
+                "customer_name": auth.customer_name,
+            }
+        )
+
         print(f"\n✅ Routing to: {DEPARTMENTS[routing.department]}")
         print(f"   Reason: {routing.routing_reason}")
         print(f"   Confidence: {routing.confidence}")
