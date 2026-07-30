@@ -1,10 +1,6 @@
 import os
-import random
-import uuid
 from dotenv import load_dotenv
-from langfuse import get_client, propagate_attributes
 from langfuse.openai import OpenAI
-from output import nicer_print
 
 # Load variables from .env file
 load_dotenv()
@@ -13,64 +9,92 @@ load_dotenv()
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
+model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
-# Generic catalogue of dishes the kitchen can cook
-ALL_DISHES = [
-    "Bolognese",
-    "Shawarma",
-    "Doner Kebab",
-    "Sushi",
-    "Margherita Pizza",
-    "Pad Thai",
-    "Chicken Curry",
-    "Caesar Salad",
-    "Beef Tacos",
-    "Ramen",
-]
+DEPARTMENTS = {
+    "rental-contracts":
+        "Rental Contracts — lease questions, renewals, amendments",
+    "terminations-moveout":
+        "Terminations & Move-out — cancellations, move-out dates, deposit returns",
+    "tenant-complaints":
+        "Tenant Complaints — noise, neighbour disputes, general grievances",
+    "energy-heating":
+        "Energy & Heating — heating failures, hot water, utility billing",
+    "repairs-maintenance":
+        "Repairs & Maintenance — broken fixtures, structural damage, general repairs",
+}
 
-# The trick: only expose 5 random dishes to the LLM on each call,
-# so the available "menu" changes from run to run.
-available_dishes = random.sample(ALL_DISHES, 5)
-
-
-def _generate_user_input() -> str:
-    generate_user_input_response = client.responses.create(
-        model="gpt-4o-mini",
-        instructions=(
-            "You generate a single, realistic meal request as if written by "
-            "a hungry person deciding what to eat. Vary the mood, cravings, "
-            "and phrasing each time. "
-            "Return only the request, with no extra commentary."
+TEST_SCENARIOS = [
+    {
+        "id": "TC-001",
+        "description": "Clear heating issue, cooperative tenant",
+        "persona": (
+            "You are Lisa Müller, a tenant at Berliner Str. 12, Berlin. "
+            "Your heating stopped working 2 days ago. You are polite but worried because it's cold. "
+            "Give your name and address when asked. Keep answers short and factual."
         ),
-        input="Generate one random meal request.",
-    )
-
-    return generate_user_input_response.output_text.strip()
-
-
-langfuse = get_client()
-
-# Attach a session id so multiple runs (each its own trace) are grouped
-# into one replayable session thread in Langfuse. A constant user_id is
-# added so traces can be attributed to (and filtered by) a specific user.
-with propagate_attributes(session_id=str(uuid.uuid4()), user_id="demo-user"):
-    # Group both OpenAI calls under a single parent trace so the whole
-    # request cycle is observable as one unit in Langfuse.
-    with langfuse.start_as_current_observation(name="meal-planning"):
-        user_input = _generate_user_input()
-        # user_input = "I want a big bowl of creamy mac and cheese with a crispy topping"
-
-        # Fetch the managed prompt from Langfuse and fill its {{dishes}}
-        # placeholder with this run's available dishes.
-        meal_prompt = langfuse.get_prompt("meal-prep-prompt")
-        instructions = meal_prompt.compile(dishes=", ".join(available_dishes))
-
-        response = client.responses.create(  # type: ignore[call-overload]
-            model="gpt-4o-mini",
-            instructions=instructions,
-            input=user_input,
-            # Link the generation to the prompt version for per-prompt metrics.
-            langfuse_prompt=meal_prompt,
-        )
-
-nicer_print(user_input, available_dishes, response.output_text)
+        "expected_department": "energy-heating",
+        "max_turns": 5,
+        "min_friendliness": 3,
+    },
+    {
+        "id": "TC-002",
+        "description": "Lease termination, calm and direct",
+        "persona": (
+            "You are Thomas Bauer, a tenant at Hauptstr. 7, Hamburg. "
+            "You want to end your lease. You are calm and businesslike. "
+            "Give your name and address when asked."
+        ),
+        "expected_department": "terminations-moveout",
+        "max_turns": 5,
+        "min_friendliness": 2,
+    },
+    {
+        "id": "TC-003",
+        "description": "Noise complaint, frustrated tone",
+        "persona": (
+            "You are Emre Yilmaz, a tenant at Gartenweg 3, Munich. "
+            "Your upstairs neighbour makes noise every night and you haven't slept in a week. "
+            "You are frustrated and slightly impatient. Give your details when asked."
+        ),
+        "expected_department": "tenant-complaints",
+        "max_turns": 6,
+        "min_friendliness": 3,
+    },
+    {
+        "id": "TC-004",
+        "description": "Auth failure — wrong address",
+        "persona": (
+            "You are Sandra Koch. You want to report a broken window. "
+            "When asked for your address, say 'Musterstr. 99, Berlin' — this is not a real tenant address. "
+            "Do not correct it even if the agent says it can't be verified."
+        ),
+        "expected_department": "auth-failed",  # special value: we expect the call to end here
+        "max_turns": 3,
+        "min_friendliness": 3,
+    },
+    {
+        "id": "TC-005",
+        "description": "Ambiguous issue — agent must ask, not guess",
+        "persona": (
+            "You are Klaus Werner, a tenant at Friedrichstr. 45, Berlin. "
+            "Your opening message is just: 'I have a problem with my apartment.' "
+            "Only give more details if the agent asks a direct question. Be cooperative."
+        ),
+        "expected_department": None,  # any correct department is acceptable — we test that the agent asks first
+        "max_turns": 6,
+        "min_friendliness": 3,
+    },
+    {
+        "id": "TC-006",
+        "description": "Tricky phrasing — sounds like terminations but is energy",
+        "persona": (
+            "You are Yuki Tanaka, a tenant at Rosenweg 8, Frankfurt. "
+            "You want to cancel your energy supply contract, not your apartment lease. "
+            "Say: 'I want to cancel my energy contract.' Give your details when asked."
+        ),
+        "expected_department": "energy-heating",
+        "max_turns": 5,
+        "min_friendliness": 2,
+    },
+]
