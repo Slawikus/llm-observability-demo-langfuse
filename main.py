@@ -142,6 +142,7 @@ def route_conversation(transcript: list[dict]) -> RoutingDecision | None:
     except Exception:
         return None
 
+
 class AuthResult(BaseModel):
     verified: bool
     customer_name: str
