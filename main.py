@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from langfuse.openai import OpenAI
 from pydantic import BaseModel
+from rich import print
 
 # Load variables from .env file
 load_dotenv()
@@ -142,6 +143,14 @@ def route_conversation(transcript: list[dict]) -> RoutingDecision | None:
     except Exception:
         return None
 
+# give routing a shot
+routing_decision = route_conversation(
+    transcript=[
+        {"role": "tenant", "text": "I want to terminate my lease."}
+    ]
+)
+print(routing_decision)
+
 
 class AuthResult(BaseModel):
     verified: bool
@@ -168,6 +177,13 @@ def check_auth(name: str, address: str) -> AuthResult:
         response_format=AuthResult
     )
     return response.choices[0].message.parsed
+
+# give check_auth a shot:
+check_auth_result = check_auth(
+    name="Jennifer Lopes",
+    address="Berliner Str. 12, 33222 Dortmund"
+)
+print(check_auth_result)
 
 
 def test_agent_message(persona: str, conversation_history: list[dict]) -> str:
