@@ -167,3 +167,31 @@ def check_auth(name: str, address: str) -> AuthResult:
         response_format=AuthResult
     )
     return response.choices[0].message.parsed
+
+
+def test_agent_message(persona: str, conversation_history: list[dict]) -> str:
+    """Given a persona and the conversation so far, generate the next customer message."""
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"{persona}\n\n"
+                "You are participating in a customer support call. "
+                "Respond naturally as this person would. "
+                "Keep each response short — 1–3 sentences maximum. "
+                "Do not break character."
+            )
+        }
+    ]
+
+    # Add conversation history:
+    # agent messages become 'user' from the test agent's perspective
+    for turn in conversation_history:
+        role = "assistant" if turn["role"] == "tenant" else "user"
+        messages.append({"role": role, "content": turn["text"]})
+
+    messages.append({"role": "user", "content": "What do you say next?"})
+
+    response = client.chat.completions.create(model=model, messages=messages)
+    return response.choices[0].message.content.strip()
