@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from langfuse.openai import OpenAI
+from pydantic import BaseModel
 
 # Load variables from .env file
 load_dotenv()
@@ -23,6 +24,7 @@ DEPARTMENTS = {
     "repairs-maintenance":
         "Repairs & Maintenance — broken fixtures, structural damage, general repairs",
 }
+
 
 TEST_SCENARIOS = [
     {
@@ -98,3 +100,70 @@ TEST_SCENARIOS = [
         "min_friendliness": 2,
     },
 ]
+
+
+ROUTING_SYSTEM_PROMPT = (
+    "You are a routing agent at Stadtquartier Wohnservice, "
+    "a residential property management company.\n"
+    "Based on the conversation transcript, "
+    "decide which department should handle this tenant's issue.\n\n"
+    "Available departments:\n"
+    + "\n".join(f"- {k}: {v}" for k, v in DEPARTMENTS.items())
+    + "\n\nChoose exactly one department key from the list above. "
+    "In routing_reason, explain specifically why this department is the right fit."
+)
+
+
+class RoutingDecision(BaseModel):
+    department: str
+    routing_reason: str
+    issue_summary: str
+    confidence: str  # "low" / "medium" / "high"
+
+
+def route_conversation(transcript: list[dict]) -> RoutingDecision | None:
+    """Takes a list of {"role": "tenant"/"agent", "text": "..."} dicts,
+    returns routing decision."""
+
+    transcript_text = "\n".join(
+        f"{t['role'].upper()}: {t['text']}" for t in transcript
+    )
+
+    try:
+        response = client.beta.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "system", "content": ROUTING_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Conversation:\n{transcript_text}"}
+            ],
+            response_format=RoutingDecision
+        )
+        return response.choices[0].message.parsed
+    except Exception:
+        return None
+
+class AuthResult(BaseModel):
+    verified: bool
+    customer_name: str
+    reason: str
+
+
+def check_auth(name: str, address: str) -> AuthResult:
+    response = client.beta.chat.completions.parse(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You simulate a tenant database check. "
+                    "If the address has a recognisable street name and number, "
+                    "mark verified. "
+                    "Clearly fictional or incomplete addresses "
+                    "(like 'Musterstr. 99') are not verified."
+                )
+            },
+            {"role": "user", "content": f"Name: {name}\nAddress: {address}"}
+        ],
+        response_format=AuthResult
+    )
+    return response.choices[0].message.parsed
