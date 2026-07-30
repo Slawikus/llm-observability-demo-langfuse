@@ -1,161 +1,130 @@
 import os
-import uuid
+from openai import OpenAI
+from langfuse import get_client
 from dotenv import load_dotenv
-from langfuse.openai import OpenAI
-from pydantic import BaseModel
-from langfuse import get_client, observe, propagate_attributes
 
 # Load variables from .env file
 load_dotenv()
 
-DEPARTMENTS = {
-    "rental-contracts":
-        "Rental Contracts — lease questions, renewals, amendments",
-    "terminations-moveout":
-        "Terminations & Move-out — cancellations, move-out dates, deposit returns",
-    "tenant-complaints":
-        "Tenant Complaints — noise, neighbour disputes, general grievances",
-    "energy-heating":
-        "Energy & Heating — heating failures, hot water, utility billing",
-    "repairs-maintenance":
-        "Repairs & Maintenance — broken fixtures, structural damage, general repairs",
-}
-
-class AuthResult(BaseModel):
-    verified: bool
-    customer_name: str
-    reason: str
-
-class RoutingDecision(BaseModel):
-    department: str        # one of the five keys above
-    routing_reason: str    # why this department — key for later analysis
-    issue_summary: str
-    confidence: str        # "low" / "medium" / "high"
-
-# Create OpenAI client instance
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+langfuse = get_client()
 model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
-langfuse = get_client()
+VALID_DEPARTMENTS = {
+    "rental-contracts",
+    "terminations-moveout",
+    "tenant-complaints",
+    "energy-heating",
+    "repairs-maintenance"
+}
 
-@observe(name="step-greeting")
-def greet_and_collect_name() -> str:
+# Four conversations — two good, two with problems
+TRANSCRIPTS = [
+    {
+        "id": "trace-001",
+        "expected_department": "energy-heating",
+        "actual_department": "energy-heating",
+        "description": "Clear heating issue, warm agent",
+        "turns": [
+            {"role": "tenant", "text": "Hi, my heating has been broken for two days, it's freezing in here."},
+            {"role": "agent",  "text": "Oh no, I'm so sorry to hear that — two days without heat is really uncomfortable. Can I take your name and address so I can pull up your file?"},
+            {"role": "tenant", "text": "Lisa Müller, Berliner Str. 12, Berlin."},
+            {"role": "agent",  "text": "Thank you Lisa, I've verified your details. I'm routing you to our Energy & Heating team right now — they handle exactly this and will prioritise your case. Is there anything else before I connect you?"},
+        ]
+    },
+    {
+        "id": "trace-002",
+        "expected_department": "terminations-moveout",
+        "actual_department": "terminations-moveout",
+        "description": "Lease termination, direct and professional",
+        "turns": [
+            {"role": "tenant", "text": "I want to terminate my lease."},
+            {"role": "agent",  "text": "Understood. Could I get your name and address to verify your tenancy?"},
+            {"role": "tenant", "text": "Thomas Bauer, Hauptstr. 7, Hamburg."},
+            {"role": "agent",  "text": "Thank you Mr Bauer. I'm connecting you to our Terminations & Move-out department. They'll walk you through the notice period and next steps."},
+        ]
+    },
+    {
+        "id": "trace-003",
+        "expected_department": "tenant-complaints",
+        "actual_department": "repairs-maintenance",  # WRONG routing
+        "description": "Noise complaint, routed incorrectly",
+        "turns": [
+            {"role": "tenant", "text": "My upstairs neighbour is making noise constantly. I can't sleep."},
+            {"role": "agent",  "text": "I understand. What's your name and address?"},
+            {"role": "tenant", "text": "Emre Yilmaz, Gartenweg 3, Munich."},
+            {"role": "agent",  "text": "Thank you. I'm sending you to Repairs & Maintenance — they handle apartment issues."},
+        ]
+    },
+    {
+        "id": "trace-004",
+        "expected_department": "energy-heating",
+        "actual_department": "energy-heating",
+        "description": "Agent loops on the same question, then invents a department",
+        "turns": [
+            {"role": "tenant", "text": "My hot water isn't working."},
+            {"role": "agent",  "text": "Can you tell me more about the issue?"},
+            {"role": "tenant", "text": "The hot water stopped yesterday."},
+            {"role": "agent",  "text": "Can you tell me more about the issue?"},  # loop
+            {"role": "tenant", "text": "I already told you. Hot water. Not working."},
+            {"role": "agent",  "text": "I see. I'll route you to our Plumbing & Utilities Emergency Response Centre."},  # hallucinated department
+        ]
+    },
+]
+
+def rule_based_eval(transcript: dict) -> dict:
+    turns = transcript["turns"]
+    turn_count = len(turns)
+
+    # Routing match
+    routing_correct = transcript["actual_department"] == transcript["expected_department"]
+
+    # Loop detection: did the agent say the same thing twice?
+    agent_messages = [t["text"] for t in turns if t["role"] == "agent"]
+    has_loop = len(agent_messages) != len(set(agent_messages))
+
+    return {
+        "turn_count": turn_count,
+        "routing_correct": routing_correct,
+        "has_loop": has_loop,
+    }
+
+# Test it
+for t in TRANSCRIPTS:
+    result = rule_based_eval(t)
+    print(f"{t['id']} | routing_correct={result['routing_correct']} | turns={result['turn_count']} | loop={result['has_loop']}")
+
+
+FRIENDLINESS_RUBRIC = """
+You are evaluating the friendliness and empathy of an AI customer support agent.
+
+Score the AGENT's side of the conversation on a scale of 1 to 5:
+  1 = Cold, dismissive, or impatient — makes the tenant feel like a burden
+  2 = Curt — answers the question but no warmth
+  3 = Professional but flat — polite, neutral, adequate
+  4 = Warm — acknowledges the tenant's situation, sounds like a real person
+  5 = Excellent — empathetic, makes the tenant feel heard and cared for
+
+Respond in JSON: {"score": <1-5>, "reason": "<one sentence>"}
+Only evaluate the agent, not the tenant.
+"""
+
+def judge_friendliness(transcript: dict) -> dict:
+    conversation_text = "\n".join(
+        f"{t['role'].upper()}: {t['text']}" for t in transcript["turns"]
+    )
+
+    print(conversation_text)
     response = client.chat.completions.create(
-        model=model,
+        model="gpt-5-mini",          # different model from the agent (gpt-4o-mini)
+        response_format={"type": "json_object"},
         messages=[
-            {
-                "role": "system", 
-                "content": (
-                    "You are a friendly receptionist at Stadtquartier Wohnservice, "
-                    "a residential property management company. Greet the tenant warmly. "
-                    "If they haven't given their name, ask for it."
-                )
-            },
+            {"role": "system", "content": FRIENDLINESS_RUBRIC},
+            {"role": "user", "content": f"Conversation:\n{conversation_text}"}
         ]
     )
-    return response.choices[0].message.content
+    import json
+    return json.loads(response.choices[0].message.content)
 
-
-@observe(name="step-auth")
-def verify_tenant(name: str, address: str) -> AuthResult:
-    # Manual sub-span inside the @observe function
-    with langfuse.start_as_current_observation(name="address-format-check") as span:
-        is_plausible = len(address.split()) >= 2
-        span.update(metadata={"raw_address": address, "passed_format": is_plausible})
-
-    response = client.beta.chat.completions.parse(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You simulate a tenant verification system. "
-                    "If the address sounds plausible (street name + house number + city), "
-                    "mark as verified. "
-                    "If it is clearly fictional or incomplete, mark as not verified."
-                )
-            },
-            {"role": "user", "content": f"Name: {name}\nAddress: {address}"}
-        ],
-        response_format=AuthResult
-    )
-    return response.choices[0].message.parsed
-
-
-@observe(name="step-routing")
-def route_to_department(transcript: str) -> RoutingDecision:
-    dept_list = "\n".join(f"- {k}: {v}" for k, v in DEPARTMENTS.items())
-
-    response = client.beta.chat.completions.parse(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    f"You are a routing agent at Stadtquartier Wohnservice.\n"
-                    f"Based on the conversation, route the tenant to the correct department.\n\n"
-                    f"Available departments:\n{dept_list}\n\n"
-                    f"Choose exactly one department key. Explain your reasoning in routing_reason."
-                )
-            },
-            {"role": "user", "content": f"Conversation:\n{transcript}"}
-        ],
-        response_format=RoutingDecision
-    )
-    return response.choices[0].message.parsed
-
-
-@observe(name="tenant-routing-call")
-def handle_call():
-    session_id = uuid.uuid4().hex[:8]
-    with propagate_attributes(session_id=session_id):
-        print("\n🏠 Stadtquartier Wohnservice — Tenant Support")
-        print(f"Session: {session_id}")
-        print("-" * 45)
-
-        greeting = greet_and_collect_name()
-        print(f"Agent: {greeting}")
-
-        name = input("\nTenant (name): ").strip()
-        address = input("Tenant (address): ").strip()
-
-        auth = verify_tenant(name, address)
-        if not auth.verified:
-            print(f"Agent: I'm sorry, I couldn't verify your details. Please call us directly.")
-            with propagate_attributes(tags=["auth-failed"]):
-                return
-
-        print(f"Agent: Thank you {auth.customer_name}. How can I help you today?")
-        issue = input("Issue: ").strip()
-
-        transcript = (
-            f"Tenant name: {name}\n"
-            f"Address: {address}\n"
-            f"Issue: {issue}\n"
-        )
-
-        print(transcript)
-
-        routing = route_to_department(transcript)
-
-        # Attach routing result to the parent trace for dashboard filtering
-        propagate_attributes(
-            tags=[routing.department, f"confidence-{routing.confidence}"],
-            metadata={
-                "routing_department": routing.department,
-                "routing_reason": routing.routing_reason,
-                "confidence": routing.confidence,
-                "customer_name": auth.customer_name,
-            }
-        )
-
-        print(f"\n✅ Routing to: {DEPARTMENTS[routing.department]}")
-        print(f"   Reason: {routing.routing_reason}")
-        print(f"   Confidence: {routing.confidence}")
-        print(f"   Issue summary: {routing.issue_summary}")
-
-if __name__ == "__main__":
-    handle_call()
-    langfuse.flush()
-
-# nicer_print(user_input, available_dishes, response.output_text)
+result = judge_friendliness(TRANSCRIPTS[0])
+print(f"Friendliness: {result['score']}/5 — {result['reason']}")
