@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from dotenv import load_dotenv
 from langfuse.openai import OpenAI
 from pydantic import BaseModel
@@ -119,7 +120,7 @@ class RoutingDecision(BaseModel):
     department: str
     routing_reason: str
     issue_summary: str
-    confidence: str  # "low" / "medium" / "high"
+    confidence: Literal["low", "medium", "high"]
 
 
 def route_conversation(transcript: list[dict]) -> RoutingDecision | None:
@@ -212,3 +213,86 @@ def test_agent_message(persona: str, conversation_history: list[dict]) -> str:
 
     response = client.chat.completions.create(model=model, messages=messages)
     return response.choices[0].message.content.strip()
+
+
+AGENT_GREETING = (
+    "Thank you for calling Stadtquartier Wohnservice. "
+    "My name is Alex, how can I help you today?"
+)
+
+
+def run_test_conversation(scenario: dict) -> dict:
+    """Runs one full test conversation. Returns transcript + routing result."""
+    conversation = []
+    routing_result = None
+    auth_failed = False
+
+    # Agent opens
+    conversation.append({"role": "agent", "text": AGENT_GREETING})
+
+    for turn_num in range(scenario["max_turns"] + 2):  # small buffer
+        # Test agent responds as customer
+        customer_msg = test_agent_message(scenario["persona"], conversation)
+        conversation.append({"role": "tenant", "text": customer_msg})
+
+        # Simple auth extraction (look for name + address pattern)
+        # In a real system this would be the step-auth span from session 2
+        tenant_messages = " ".join(
+            t["text"] for t in conversation if t["role"] == "tenant"
+        )
+        if "Musterstr" in tenant_messages:
+            auth_failed = True
+            conversation.append({
+                "role": "agent",
+                "text": "I'm sorry, I wasn't able to verify your details with that address. Please contact us directly."
+            })
+            break
+
+        # After enough context (3+ turns), attempt routing
+        if len(conversation) >= 5:
+            routing_result = route_conversation(conversation)
+
+            if routing_result and routing_result.confidence in ("medium", "high"):
+                agent_reply = (
+                    f"Thank you. I'm routing you to our "
+                    f"{DEPARTMENTS.get(routing_result.department, routing_result.department)} "
+                    f"team. "
+                    f"{routing_result.routing_reason}"
+                )
+                conversation.append({"role": "agent", "text": agent_reply})
+                break
+
+        # Not enough context yet, or routing wasn't confident enough:
+        # the agent asks a clarifying question and we go round again
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a friendly receptionist. "
+                        "Ask for the tenant's name, address, or clarify their issue. "
+                        "Keep it to one short question."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": "\n".join(
+                        f"{t['role']}: {t['text']}" for t in conversation
+                    )
+                }
+            ]
+        )
+        agent_reply = response.choices[0].message.content.strip()
+        conversation.append({"role": "agent", "text": agent_reply})
+
+    return {
+        "scenario_id": scenario["id"],
+        "transcript": conversation,
+        "routing": routing_result,
+        "auth_failed": auth_failed,
+    }
+
+# give test conversation a shot:
+test_conversation_result = run_test_conversation(TEST_SCENARIOS[0])
+print(test_conversation_result)
