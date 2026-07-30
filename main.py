@@ -1,4 +1,6 @@
 import os
+import json
+import re
 from typing import Literal
 from dotenv import load_dotenv
 from langfuse.openai import OpenAI
@@ -13,6 +15,9 @@ client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# The LLM-as-Judge model is configured separately: you generally want to hold
+# the judge fixed while swapping the model under test.
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", model)
 
 DEPARTMENTS = {
     "rental-contracts":
@@ -153,40 +158,6 @@ routing_decision = route_conversation(
 print(routing_decision)
 
 
-class AuthResult(BaseModel):
-    verified: bool
-    customer_name: str
-    reason: str
-
-
-def check_auth(name: str, address: str) -> AuthResult:
-    response = client.beta.chat.completions.parse(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You simulate a tenant database check. "
-                    "If the address has a recognisable street name and number, "
-                    "mark verified. "
-                    "Clearly fictional or incomplete addresses "
-                    "(like 'Musterstr. 99') are not verified."
-                )
-            },
-            {"role": "user", "content": f"Name: {name}\nAddress: {address}"}
-        ],
-        response_format=AuthResult
-    )
-    return response.choices[0].message.parsed
-
-# give check_auth a shot:
-check_auth_result = check_auth(
-    name="Jennifer Lopes",
-    address="Berliner Str. 12, 33222 Dortmund"
-)
-print(check_auth_result)
-
-
 def test_agent_message(persona: str, conversation_history: list[dict]) -> str:
     """Given a persona and the conversation so far, generate the next customer message."""
 
@@ -220,20 +191,42 @@ AGENT_GREETING = (
     "My name is Alex, how can I help you today?"
 )
 
+# Placeholder for the real step-auth check: has the tenant given us something
+# address-shaped (German street suffix followed by a house number)? Routing is
+# gated on this, so the agent can't hand a tenant off before collecting an
+# address the auth step can actually reject.
+ADDRESS_PATTERN = re.compile(
+    r"(?:str\.|(?:straße|strasse|weg|platz|allee|gasse|ring)\b)\s*\d+",
+    re.IGNORECASE,
+)
+
 
 def run_test_conversation(scenario: dict) -> dict:
-    """Runs one full test conversation. Returns transcript + routing result."""
+    """Runs one full test conversation. Returns transcript + routing result.
+
+    Every turn carries a "scripted" flag: True for hardcoded agent lines
+    (the greeting, the auth rejection), False for anything a model wrote.
+    The friendliness judge only scores unscripted turns — otherwise it is
+    grading string literals rather than agent behaviour.
+    """
     conversation = []
     routing_result = None
     auth_failed = False
+    clarifying_turns = 0
 
     # Agent opens
-    conversation.append({"role": "agent", "text": AGENT_GREETING})
+    conversation.append(
+        {"role": "agent", "text": AGENT_GREETING, "scripted": True}
+    )
 
-    for turn_num in range(scenario["max_turns"] + 2):  # small buffer
+    # One turn of headroom past max_turns, so blowing the budget is
+    # observable in the results instead of being clipped by the loop bound.
+    for turn_num in range(scenario["max_turns"] + 2):
         # Test agent responds as customer
         customer_msg = test_agent_message(scenario["persona"], conversation)
-        conversation.append({"role": "tenant", "text": customer_msg})
+        conversation.append(
+            {"role": "tenant", "text": customer_msg, "scripted": False}
+        )
 
         # Simple auth extraction (look for name + address pattern)
         # In a real system this would be the step-auth span from session 2
@@ -244,35 +237,51 @@ def run_test_conversation(scenario: dict) -> dict:
             auth_failed = True
             conversation.append({
                 "role": "agent",
-                "text": "I'm sorry, I wasn't able to verify your details with that address. Please contact us directly."
+                "text": (
+                    "I'm sorry — I couldn't match that address to a tenant record, "
+                    "so I'm not able to go further on this call. If you check the "
+                    "address on your lease and call us back, we'll pick it up right away."
+                ),
+                "scripted": True,
             })
             break
 
-        # After enough context (3+ turns), attempt routing
-        if len(conversation) >= 5:
-            routing_result = route_conversation(conversation)
+        # Auth comes before routing: don't hand the tenant off until they've
+        # actually given an address, so the auth check above gets a chance to
+        # reject it. After that, confidence decides when to route rather than a
+        # fixed conversation length — which is what makes max_turns a real budget.
+        if ADDRESS_PATTERN.search(tenant_messages):
+            attempt = route_conversation(conversation)
 
-            if routing_result and routing_result.confidence in ("medium", "high"):
+            if attempt and attempt.confidence in ("medium", "high"):
+                routing_result = attempt
                 agent_reply = (
                     f"Thank you. I'm routing you to our "
                     f"{DEPARTMENTS.get(routing_result.department, routing_result.department)} "
                     f"team. "
                     f"{routing_result.routing_reason}"
                 )
-                conversation.append({"role": "agent", "text": agent_reply})
+                conversation.append(
+                    {"role": "agent", "text": agent_reply, "scripted": False}
+                )
                 break
 
-        # Not enough context yet, or routing wasn't confident enough:
-        # the agent asks a clarifying question and we go round again
+        # Router isn't confident enough yet: the agent asks a clarifying
+        # question and we go round again.
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are a friendly receptionist. "
-                        "Ask for the tenant's name, address, or clarify their issue. "
-                        "Keep it to one short question."
+                        "You are a warm, empathetic receptionist. "
+                        "Briefly acknowledge what the tenant has told you. "
+                        "Before anything else you must collect their full name AND "
+                        "their street address, including street name and house "
+                        "number — ask for whichever is still missing, and do not "
+                        "accept an apartment number in place of a street address. "
+                        "Only once you have both may you ask about the issue itself. "
+                        "Two sentences maximum."
                     )
                 },
                 {
@@ -284,15 +293,148 @@ def run_test_conversation(scenario: dict) -> dict:
             ]
         )
         agent_reply = response.choices[0].message.content.strip()
-        conversation.append({"role": "agent", "text": agent_reply})
+        conversation.append(
+            {"role": "agent", "text": agent_reply, "scripted": False}
+        )
+        clarifying_turns += 1
 
     return {
         "scenario_id": scenario["id"],
         "transcript": conversation,
         "routing": routing_result,
         "auth_failed": auth_failed,
+        "clarifying_turns": clarifying_turns,
     }
 
 # give test conversation a shot:
 test_conversation_result = run_test_conversation(TEST_SCENARIOS[0])
 print(test_conversation_result)
+
+
+FRIENDLINESS_RUBRIC = """
+Score the AGENT's tone on a scale of 1 to 5:
+  1 = cold or dismissive
+  3 = professional but flat
+  5 = warm and empathetic
+Return JSON: {"score": <1-5>, "reason": "<one sentence>"}
+"""
+
+
+def evaluate_result(scenario: dict, result: dict) -> dict:
+    transcript = result["transcript"]
+    routing = result["routing"]
+    auth_failed = result["auth_failed"]
+    clarifying_turns = result["clarifying_turns"]
+
+    # An auth failure is not a routing decision, so it doesn't belong in the
+    # routing-accuracy denominator.
+    is_routing_test = scenario["expected_department"] != "auth-failed"
+
+    # Routing match
+    if scenario["expected_department"] == "auth-failed":
+        routing_correct = auth_failed
+    elif scenario["expected_department"] is None:
+        # TC-005: the department is genuinely open, but the agent must not guess
+        # from an opening as vague as "I have a problem with my apartment" —
+        # it has to ask at least one clarifying question and still land a
+        # confident routing decision.
+        routing_correct = routing is not None and clarifying_turns >= 1
+    else:
+        routing_correct = (
+                routing is not None and routing.department == scenario["expected_department"]
+        )
+
+    # Turn count
+    turn_count = len([t for t in transcript if t["role"] == "tenant"])
+    within_budget = turn_count <= scenario["max_turns"]
+
+    # Friendliness (LLM-as-Judge). Scripted agent lines are dropped: judging
+    # them scores a string literal, which no change to the agent can improve.
+    convo_text = "\n".join(
+        f"{t['role'].upper()}: {t['text']}"
+        for t in transcript
+        if not (t["role"] == "agent" and t["scripted"])
+    )
+    judge_response = client.chat.completions.create(
+        model=JUDGE_MODEL,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": FRIENDLINESS_RUBRIC},
+            {"role": "user", "content": convo_text}
+        ]
+    )
+    friendliness_result = json.loads(judge_response.choices[0].message.content)
+    friendliness_score = friendliness_result["score"]
+
+    passed = (routing_correct
+              and within_budget
+              and friendliness_score >= scenario["min_friendliness"])
+
+    return {
+        "id": scenario["id"],
+        "description": scenario["description"],
+        "expected": scenario["expected_department"] or "any",
+        "actual": routing.department if routing else ("auth-failed" if auth_failed else "no-routing"),
+        "routing_correct": routing_correct,
+        "is_routing_test": is_routing_test,
+        "turns": turn_count,
+        "clarifying_turns": clarifying_turns,
+        "within_budget": within_budget,
+        "friendliness": friendliness_score,
+        "routing_reason": routing.routing_reason if routing else "—",
+        "passed": passed,
+    }
+
+
+def run_suite(scenarios: list) -> list:
+    results = []
+
+    for scenario in scenarios:
+        print(f"Running {scenario['id']}: {scenario['description']}...")
+        conversation_result = run_test_conversation(scenario)
+        eval_result = evaluate_result(scenario, conversation_result)
+        results.append(eval_result)
+        status = "✅ PASS" if eval_result["passed"] else "❌ FAIL"
+        print(f"  {status} — routing: {eval_result['actual']} | turns: {eval_result['turns']} | friendliness: {eval_result['friendliness']}/5")
+
+    return results
+
+
+def print_report(results: list):
+    print("\n" + "=" * 82)
+    print(
+        f"{'ID':<8} {'Expected':<22} {'Actual':<22} "
+        f"{'Turns':>5} {'Asked':>6} {'Friend':>7} {'Result':>6}"
+    )
+    print("-" * 82)
+
+    for r in results:
+        status = "PASS" if r["passed"] else "FAIL"
+        print(
+            f"{r['id']:<8} {r['expected']:<22} {r['actual']:<22} "
+            f"{r['turns']:>5} {r['clarifying_turns']:>6} "
+            f"{r['friendliness']:>7} {status:>6}"
+        )
+
+    passed = sum(1 for r in results if r["passed"])
+    total = len(results)
+
+    # Routing accuracy counts only scenarios that actually exercise a routing
+    # decision — auth-failure scenarios end the call before routing happens.
+    routing_tests = [r for r in results if r["is_routing_test"]]
+    routing_hits = sum(1 for r in routing_tests if r["routing_correct"])
+    routing_acc = routing_hits / len(routing_tests) if routing_tests else 0.0
+
+    avg_turns = sum(r["turns"] for r in results) / total
+    avg_friendliness = sum(r["friendliness"] for r in results) / total
+
+    print("=" * 82)
+    print(
+        f"SUMMARY: {passed}/{total} passed | "
+        f"routing accuracy: {routing_acc:.0%} ({routing_hits}/{len(routing_tests)}) | "
+        f"avg turns: {avg_turns:.1f} | avg friendliness: {avg_friendliness:.1f}/5"
+    )
+
+if __name__ == "__main__":
+    results = run_suite(TEST_SCENARIOS)
+    print_report(results)
