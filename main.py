@@ -1,4 +1,5 @@
 import os
+import json
 from openai import OpenAI
 from langfuse import get_client
 from dotenv import load_dotenv
@@ -123,8 +124,80 @@ def judge_friendliness(transcript: dict) -> dict:
             {"role": "user", "content": f"Conversation:\n{conversation_text}"}
         ]
     )
-    import json
+
     return json.loads(response.choices[0].message.content)
 
 result = judge_friendliness(TRANSCRIPTS[0])
 print(f"Friendliness: {result['score']}/5 — {result['reason']}")
+
+
+HALLUCINATION_PROMPT = f"""
+You are checking whether a customer support agent invented information that doesn't exist.
+
+The ONLY valid department names are:
+- rental-contracts
+- terminations-moveout
+- tenant-complaints
+- energy-heating
+- repairs-maintenance
+
+Check if the agent mentioned any department name, policy, or procedure that is NOT on this list.
+
+Respond in JSON: {{"hallucination_detected": true/false, "reason": "<one sentence>"}}
+"""
+
+def judge_hallucination(transcript: dict) -> dict:
+    agent_text = " ".join(t["text"] for t in transcript["turns"] if t["role"] == "agent")
+
+    response = client.chat.completions.create(
+        model="gpt-5-mini",          # different model from the agent (gpt-4o-mini)
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": HALLUCINATION_PROMPT},
+            {"role": "user", "content": f"Agent messages:\n{agent_text}"}
+        ]
+    )
+
+    return json.loads(response.choices[0].message.content)
+
+result = judge_hallucination(TRANSCRIPTS[3])  # the bad one
+print(f"Hallucination: {result['hallucination_detected']} — {result['reason']}")
+
+
+def evaluate_conversation(transcript: dict) -> dict:
+    rules = rule_based_eval(transcript)
+    friendliness = judge_friendliness(transcript)
+    hallucination = judge_hallucination(transcript)
+
+    return {
+        "id": transcript["id"],
+        "description": transcript["description"],
+        "routing_correct": rules["routing_correct"],
+        "turn_count": rules["turn_count"],
+        "has_loop": rules["has_loop"],
+        "friendliness": friendliness["score"],
+        "friendliness_reason": friendliness["reason"],
+        "hallucination": hallucination["hallucination_detected"],
+        "hallucination_reason": hallucination["reason"],
+    }
+
+
+evaluation_results = []
+for t in TRANSCRIPTS:
+    evaluation_results.append(
+        evaluate_conversation(t)
+    )
+
+
+print(f"\n{'ID':<12} {'Routing':>8} {'Turns':>6} {'Loop':>6} {'Friend':>7} {'Halluc':>7}")
+print("-" * 55)
+
+for r in evaluation_results:
+    print(
+        f"{r['id']:<12} "
+        f"{'✅' if r['routing_correct'] else '❌':>7} "
+        f"{r['turn_count']:>6} "
+        f"{'❌' if r['has_loop'] else '✅':>5} "
+        f"{r['friendliness']:>7} "
+        f"{'❌' if r['hallucination'] else '✅':>6}"
+    )
